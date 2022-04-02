@@ -33,7 +33,8 @@ enum btn_flag_enum {
   left_button_pressed = (1u << 0),
   right_button = (1u << 1),
   left_button_released = (1u << 2),
-  all_flags = (left_button | right_button | neither_button)
+  shield_expired = (1u << 3),
+  all_flags = (left_button_pressed | right_button | left_button_released | shield_expired)
 };
 
 // Game Data
@@ -94,6 +95,9 @@ struct HMShield {
   // Exclusively Passive Bounce Kinetic Energy Reduction [%]
   float exclusivePB_KE_Reduction;
   // Boost [Struct]
+  struct Boost boost;
+  // Shield Engaged []
+  bool shieldBoostEngaged;
 };
 
 // Laser
@@ -108,6 +112,13 @@ struct Laser {
 struct Velocity {
   float vx;
   float vy;
+};
+
+//Boost
+struct Boost {
+  float KEincrease;
+  float armingWindow;
+  float rechargeTime;
 };
 
 

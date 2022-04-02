@@ -23,6 +23,8 @@
 #define SHIELD_CHARGER_TASK_STACK_SIZE      128
 
 #define SHIELD_CHARGER_TASK_PRIORITY        20
+
+#define MAX_SHIELD_TICKS                    50
 /***************************************************************************//**
  * Initialize blink example
  ******************************************************************************/

@@ -32,6 +32,11 @@
 #include <stdio.h>
 
 /*******************************************************************************
+* Testing Variables
+*******************************************************************************/
+static bool buttonFlagsUT = true;
+
+/*******************************************************************************
 * Task Variables
 *******************************************************************************/
 //Task Variables
@@ -56,12 +61,20 @@ static CPU_STK gameMonitor_stack[GAME_MONITOR_TASK_STACK_SIZE];
 /*******************************************************************************
 * ITC Variables
 *******************************************************************************/
-//Button Flag Group
-static OS_FLAG_GRP BTN_Flags;
+static OS_FLAG_GRP BTN_Flags; //Button Flag Group
+static OS_TMR Shield_Armed_Timer; //Shield Arming Window Timer
+static OS_TMR Shield_Recharge_Timer; //Shield Recharge Length Timer
+static OS_MUTEX Shield_Mutex; //Shield Data Protection
 
 /*******************************************************************************
-* Data Structures
+* Data
 *******************************************************************************/
+static struct Platform platform;
+static struct Boost shieldBoost;
+static struct HMShield shield;
+static GLIB_Context_t glibContext;
+
+static bool shieldAvailible;
 
 /*******************************************************************************
  *********************   LOCAL FUNCTION PROTOTYPES   ***************************
@@ -74,6 +87,9 @@ static void physicsManager_task(void *arg);
 static void laserController_task(void *arg);
 static void HM_manager_task(void *arg);
 static void gameMonitor_task(void *arg);
+static void Shield_Armed_TimerCallback(void);
+static void Shield_Recharge_TimerCallback(void);
+
 
 /*******************************************************************************
  **************************   INITAL FUNCTIONS   *******************************
@@ -85,12 +101,75 @@ static void gameMonitor_task(void *arg);
  ******************************************************************************/
 void app_init(void)
 {
+  //Input/Output Initialization
+  //----------------------------------------------------------------------------
   gpio_open();
   CAPSENSE_Init();
-  buttonInput_init();
-  sliderInput_init();
+
+  //ITC Initialization
+  //----------------------------------------------------------------------------
+  //Button Input Flag Creation
+  RTOS_ERR flg_err;
+  OSFlagCreate(&BTN_Flags, "Button Input Flags", 0, &flg_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(flg_err) == RTOS_ERR_NONE); //Check for flag creation errors
+
+  //Shield Armed Timer Creation
+  RTOS_ERR armed_timer_err;
+  OSTmrCreate(&Shield_Armed_Timer, "Shield Armed Timer", SHIELD_ARMING_WINDOW , OS_OPT_TMR_ONE_SHOT, &Shield_Armed_TimerCallback, DEF_NULL, &armed_timer_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(armed_timer_err) == RTOS_ERR_NONE); //Check for timer creation errors
+
+  //Shield Recharge Timer Creation
+  RTOS_ERR recharge_timer_err;
+  OSTmrCreate(&Shield_Recharge_Timer, "Shield Recharge Timer", SHIELD_RECHARGE_TIME, OS_OPT_TMR_ONE_SHOT, &Shield_Recharge_TimerCallback, DEF_NULL, &recharge_timer_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(recharge_timer_err) == RTOS_ERR_NONE); //Check for timer creation errors
+
+  //Shield Data MutEx
+  RTOS_ERR shield_mut_err;
+  OSMutexCreate(&Shield_Mutex, "Shield Data MutEx", &shield_mut_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(shield_mut_err) == RTOS_ERR_NONE); //Check for timer creation errors
+
+  //Task Initialization
+  //----------------------------------------------------------------------------
+  lcdDisplay_init();
   ledOutput_init();
+  shieldCharger_init();
+  platformDirection_init();
+  physicsManager_init();
+  laserController_init();
+  HM_manaager_init();
+  gameMonitor_init();
+
+  //Game Data Initialization
+  //----------------------------------------------------------------------------
+  //gameData_init();
 }
+
+
+/***************************************************************************//**
+ * Initialize Game Data.
+ ******************************************************************************/
+void gameData_init(void)
+{
+  //Initializing Platform data
+  platform.autoControl = PLATFORM_AUTO_CONTROL;
+  platform.length = PLATFORM_LENGTH;
+  platform.maxForce = PLATFORM_MAX_FORCE;
+  platform.mass = PLATFORM_MASS;
+
+  //Initializing the Shield Data
+
+  shieldBoost.KEincrease = SHIELD_BOOST_KE_INCREASE;
+  shieldBoost.armingWindow = SHIELD_ARMING_WINDOW;
+  shieldBoost.rechargeTime = SHIELD_RECHARGE_TIME;
+
+  shield.exclusivePB_KE_Reduction = SHIELD_PASSIVE_KE_REDUCTION;
+  shield.boost = shieldBoost;
+  shield.shieldBoostEngaged = false;
+
+}
+
+
+
 
 /***************************************************************************//**
  * Initialize LCD Display Task.
@@ -109,17 +188,17 @@ void lcdDisplay_init(void)
    EFM_ASSERT(status == DMD_OK);
 
    //Initialize the glib context */
-   //status = GLIB_contextInit(&glibContext);
+   status = GLIB_contextInit(&glibContext);
    EFM_ASSERT(status == GLIB_OK);
 
-   //glibContext.backgroundColor = White;
-   //glibContext.foregroundColor = Black;
+   glibContext.backgroundColor = White;
+   glibContext.foregroundColor = Black;
 
    //Fill LCD with background color
-   //GLIB_clear(&glibContext);
+   GLIB_clear(&glibContext);
 
    //Use Narrow font
-   //GLIB_setFont(&glibContext, (GLIB_Font_t *) &GLIB_FontNarrow6x8);
+   GLIB_setFont(&glibContext, (GLIB_Font_t *) &GLIB_FontNarrow6x8);
 
   // Create LCD Display Task
   OSTaskCreate(&lcd_tcb,
@@ -310,6 +389,15 @@ void gameMonitor_init(void)
  ************************   GLOBAL FUNCTIONS   *********************************
  ******************************************************************************/
 
+//Shield Armed Timer Callback
+void Shield_Armed_TimerCallback(){
+
+}
+
+//Shield Recharge Timer Callback
+void Shield_Recharge_TimerCallback(){
+  shieldAvailible = true;
+}
 /***************************************************************************//**
  * Button Flags Function.
  * buttonFlags handles waking up the correct task when a GPIO interrupt is
@@ -376,7 +464,11 @@ void buttonEvent(int interruptDiv)
 
 /***************************************************************************//**
  * Shield Charger Task.
- *
+ * shieldCharger_task handles taking input from the buttons and managing the
+ * shield parameters based on the left button input. When the left button is
+ * pressed, the shield is engaged and a timer will start. The shield can only
+ * be active for a set time. When the left button is released the timer is
+ * stopped and the shield is disengaged.
  ******************************************************************************/
 static void shieldCharger_task(void *arg)
 {
@@ -388,7 +480,33 @@ static void shieldCharger_task(void *arg)
     RTOS_ERR err;
     while (1)
     {
+        //Pend on the button flag group. We are waiting for the left button events
+        flags = OSFlagPend(&BTN_Flags, (left_button_pressed | left_button_released | shield_expired), (OS_OPT_PEND_FLAG_SET_ANY | OS_OPT_PEND_BLOCKING | OS_OPT_PEND_FLAG_CONSUME), DEF_NULL, &err);
+        EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for flag pend errors
 
+        if(flags & left_button_pressed) { //Left button has been activated according to buttonFlags
+            //Check if the shield re-charge timer is complete
+            if(shieldAvailible) {
+              //Engage the shield by claiming the shield data structure.
+              OSMutexPend(&Shield_Mutex, 0, OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+              //Update the shield Engagement
+              shield.shieldBoostEngaged = true;
+
+              //Start the armed timer
+              OSTmrStart(&Shield_Armed_Timer, &err);
+              EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for timer start errors
+
+              OSMutexPost(&Shield_Mutex, OS_OPT_POST_NONE, &err); //Release the MutEx
+            }
+            else {
+                //Need to notify the user attempting to use the shield... this will be implemented later
+            }
+        }
+
+        if(flags & (left_button_released | shield_expired)) { //Left button has been deactivated according to buttonFlags
+
+
+        }
     }
 }
 

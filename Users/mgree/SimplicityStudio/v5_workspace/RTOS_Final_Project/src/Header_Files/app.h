@@ -31,10 +31,11 @@ enum buttonInt {
 //Button Flags Enumerations
 enum btn_flag_enum {
   left_button_pressed = (1u << 0),
-  right_button = (1u << 1),
+  right_button_pressed = (1u << 1),
   left_button_released = (1u << 2),
   shield_expired = (1u << 3),
-  all_flags = (left_button_pressed | right_button | left_button_released | shield_expired)
+  right_button_released = (1u << 4),
+  all_flags = (left_button_pressed | right_button | left_button_released | shield_expired | right_button_released)
 };
 
 // Game Data
@@ -85,9 +86,11 @@ struct Platform {
   // Length [cm]
   float length;
   // Bounce Mode [Struct]
-  struct bounceMode;
+  struct BounceMode bounceMode;
   // Automatic Control [T/F]
   bool autoControl;
+  //Force applied to the platform [N]
+  float currentForce;
 };
 
 // Holtzman Shield
@@ -106,6 +109,8 @@ struct Laser {
   int activationCount;
   // Automatic Control [T/F]
   bool autoControl;
+  // Engaged [T/F]
+  bool engaged;
 };
 
 //Velocity

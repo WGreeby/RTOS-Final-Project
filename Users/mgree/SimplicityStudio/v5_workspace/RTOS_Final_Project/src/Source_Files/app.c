@@ -34,7 +34,7 @@
 /*******************************************************************************
 * Testing Variables
 *******************************************************************************/
-static bool buttonFlagsUT = true;
+static bool buttonEventUT = true;
 
 /*******************************************************************************
 * Task Variables
@@ -65,6 +65,9 @@ static OS_FLAG_GRP BTN_Flags; //Button Flag Group
 static OS_TMR Shield_Armed_Timer; //Shield Arming Window Timer
 static OS_TMR Shield_Recharge_Timer; //Shield Recharge Length Timer
 static OS_MUTEX Shield_Mutex; //Shield Data Protection
+static OS_MUTEX Platform_Mutex; //Platform Data Protection
+static OS_MUTEX Laser_Mutex; // Laser Data Protection
+static OS_SEM Laser_Semaphore; //Laser Controller trigger.
 
 /*******************************************************************************
 * Data
@@ -72,6 +75,7 @@ static OS_MUTEX Shield_Mutex; //Shield Data Protection
 static struct Platform platform;
 static struct Boost shieldBoost;
 static struct HMShield shield;
+static struct Laser laser;
 static GLIB_Context_t glibContext;
 
 static bool shieldAvailible;
@@ -126,7 +130,22 @@ void app_init(void)
   //Shield Data MutEx
   RTOS_ERR shield_mut_err;
   OSMutexCreate(&Shield_Mutex, "Shield Data MutEx", &shield_mut_err);
-  EFM_ASSERT(RTOS_ERR_CODE_GET(shield_mut_err) == RTOS_ERR_NONE); //Check for timer creation errors
+  EFM_ASSERT(RTOS_ERR_CODE_GET(shield_mut_err) == RTOS_ERR_NONE); //Check for MutEx creation errors
+
+  //Platform Data MutEx
+  RTOS_ERR platform_mut_err;
+  OSMutexCreate(&Platform_Mutex, "Platform Data MutEx", &platform_mut_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(platform_mut_err) == RTOS_ERR_NONE); //Check for MuTex creation errors.
+
+  //Laser Data MutEx
+  RTOS_ERR laser_mut_err;
+  OSMutexCreate(&Laser_Mutex, "Laser Data MutEx", &laser_mut_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(laser_mut_err) == ROTS_ERR_NONE);
+
+  //Laser Semaphore
+  RTOS_ERR laser_sem_err;
+  OSSemCreate(&Laser_Semaphore, "Laser Controller Semaphore", &laser_sem_err);
+  EFM_ASSERT(RTOS_ERR_CODE_GET(laser_sem_err) == RTOS_ERR_NONE); //Check for semaphore creation errors.
 
   //Task Initialization
   //----------------------------------------------------------------------------
@@ -165,6 +184,9 @@ void gameData_init(void)
   shield.exclusivePB_KE_Reduction = SHIELD_PASSIVE_KE_REDUCTION;
   shield.boost = shieldBoost;
   shield.shieldBoostEngaged = false;
+
+  laser.activationCount = true;
+  laser.autoControl = false;
 
 }
 
@@ -413,6 +435,7 @@ void Shield_Recharge_TimerCallback(){
  ******************************************************************************/
 void buttonEvent(int interruptDiv)
 {
+#if(!buttonEventUT)
   bool button0pressed;
   bool button1pressed;
 
@@ -436,8 +459,14 @@ void buttonEvent(int interruptDiv)
 
       if(button0pressed) {
           //Flag the laser controller
-          OSFlagPost(&BTN_Flags, right_button, OS_OPT_POST_FLAG_SET, &err);
-          if(err.Code != RTOS_ERR_NONE) EFM_ASSERT(false);
+          if(button0pressed) {
+              OSFlagPost(&BTN_Flags, right_button_pressed, OS_OPT_POST_FLAG_SET, &err);
+              if(err.Code != RTOS_ERR_NONE) EFM_ASSERT(false);
+          }
+          else {
+              OSFlagPost(&BTN_Flags, right_button_released, OS_OPT_POST_FLAG_SET, &err);
+              EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for flag post errors
+          }
       }
       return;
   }
@@ -456,6 +485,51 @@ void buttonEvent(int interruptDiv)
           return;
       }
   }
+#else
+  //Button Event Unit Test
+  //We want to evaluate under different inputs that our functions are working
+  bool button0pressed;
+    bool button1pressed;
+
+    //PinInGet returns 0 for pressed and 1 for not pressed
+    bool button0 = GPIO_PinInGet(BUTTON0_port, BUTTON0_pin);
+    bool button1 = GPIO_PinInGet(BUTTON1_port, BUTTON1_pin);
+
+    //Check if both buttons are reading zero and set global to false if that is the case
+    if (!button0 && !button1) button1pressed = false;
+    else if(!button1) button1pressed = true;
+    else button1pressed = false;
+
+    //Check if both buttons are reading zero and set global to false if that is the case
+    if (!button0 && !button1) button0pressed = false;
+    else if(!button0) button0pressed = true;
+    else button0pressed = false;
+
+    RTOS_ERR err;
+
+    if(interruptDiv == even) { //Button0 (right)
+
+        if(button0pressed) {
+            //Flag the laser controller
+            bool rightButtonFlagPost = true;
+        }
+        return;
+    }
+
+    if(interruptDiv == odd) { //Button1 (left)
+        if(button1pressed) {
+            //Flag the shield charger that the shield has been engaged
+            OSFlagPost(&BTN_Flags, left_button_pressed, OS_OPT_POST_FLAG_SET, &err);
+            if(err.Code != RTOS_ERR_NONE) EFM_ASSERT(false);
+            return;
+        }
+        else {
+            //Flag the shield charger that the shield has been released
+            OSFlagPost(&BTN_Flags, left_button_released, OS_OPT_POST_FLAG_SET, &err);
+            if(err.Code != RTOS_ERR_NONE) EFM_ASSERT(false);
+            return;
+        }
+#endif
 }
 
 /*******************************************************************************
@@ -489,6 +563,7 @@ static void shieldCharger_task(void *arg)
             if(shieldAvailible) {
               //Engage the shield by claiming the shield data structure.
               OSMutexPend(&Shield_Mutex, 0, OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+              EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
               //Update the shield Engagement
               shield.shieldBoostEngaged = true;
 
@@ -497,6 +572,7 @@ static void shieldCharger_task(void *arg)
               EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for timer start errors
 
               OSMutexPost(&Shield_Mutex, OS_OPT_POST_NONE, &err); //Release the MutEx
+              EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex post errors
             }
             else {
                 //Need to notify the user attempting to use the shield... this will be implemented later
@@ -527,7 +603,46 @@ static void platformDirection_task(void *arg)
     RTOS_ERR err;
     while (1)
     {
+        //Periodically Wake up the task to sample the capsense
+        //TODO: Determine what period we want to use to read the slider input
+        OSTimeDly(PLATFORM_TAU, OS_OPT_TIME_PERIODIC, &err);
+        EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for time delay errors
 
+        //Start a capsense reading
+        CAPSENSE_Sense();
+
+        int8_t currentForce;
+        //Four Capacitive Pads
+        bool pad0pressed = CAPSENSE_getPressed(0);
+        bool pad1pressed = CAPSENSE_getPressed(1);
+        bool pad2pressed = CAPSENSE_getPressed(2);
+        bool pad3pressed = CAPSENSE_getPressed(3);
+
+        //Determine if two pads are pressed at the same time
+        bool twoPressed = (pad0pressed && pad1pressed) ||
+                          (pad0pressed && pad2pressed) ||
+                          (pad0pressed && pad3pressed) ||
+                          (pad1pressed && pad2pressed) ||
+                          (pad1pressed && pad3pressed) ||
+                          (pad2pressed && pad3pressed);
+
+        //Assign values based on which pad is pressed
+        if(twoPressed) currentForce = 0; //Register Nothing
+        else if(pad0pressed) currentForce = -MAX_PLATFORM_FORCE;      // pad0 = far left pad
+        else if(pad1pressed) currentForce = -MAX_PLATFORM_FORCE / 2;  // pad1 = mid left pad
+        else if(pad2pressed) currentForce = MAX_PLATFORM_FORCE / 2;   // pad2 = mid right pad
+        else if(pad3pressed) currentForce = MAX_PLATFORM_FORCE;       // pad3 = far right pad
+        else sliderPosition = 0; //Register Nothing
+
+        //Pend on the platform data to update the current force
+        OSMutexPend(&Platform_Mutex, 0, OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+        EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
+
+        //TODO: Update the force applied to the platform. Physics Engine will handle it from here
+        platform.currentForce = currentForce;
+
+        OSMutexPost(&Platform_Mutex, OS_OPT_POST_NONE, &err);
+        EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex post errors
     }
 }
 
@@ -599,6 +714,30 @@ static void laserController_task(void *arg)
     RTOS_ERR err;
     while (1)
     {
+        //Pend on laser semaphore
+        flags = OSFlagPend(&BTN_Flags, (right_button_pressed | right_button_released), OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+        EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE);
+
+        if(flags & right_button_pressed) {
+            //Take over the laser data.
+            OSMutPend(&Laser_Mutex, 0, OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+            EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
+            //Update the laser count
+            laser.engaged = true;
+            laser.activationCount++;
+            OSMutPost(&Laser_Mutex, 0, OS_OPT_POST_NONE, &err);
+            EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
+        }
+
+        else if(flags & right_button_released) {
+            //Take over the laser data.
+            OSMutPend(&Laser_Mutex, 0, OS_OPT_PEND_BLOCKING, DEF_NULL, &err);
+            EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
+            //Update the laser count
+            laser.engaged = false;
+            OSMutPost(&Laser_Mutex, 0, OS_OPT_POST_NONE, &err);
+            EFM_ASSERT(RTOS_ERR_CODE_GET(err) == RTOS_ERR_NONE); //Check for mutex pend errors
+        }
 
     }
 }
